@@ -3,32 +3,30 @@
 #include <cstring>
 #include <stdexcept>
 #include <iomanip>
-#include <vector>
-#include <string>
+#include <sys/resource.h>
+
 #include "buddy_system.h"
 #include "procesamiento_imagen.h"
 #include "stb_image.h"
 #include "stb_image_write.h"
 
+long obtener_memoria_kb() {
+    struct rusage usage;
+    getrusage(RUSAGE_SELF, &usage);
+    return usage.ru_maxrss; // En KB
+}
+
 void mostrar_ayuda() {
     std::cout << "Uso: ./programa_imagen entrada.jpg salida.jpg -angulo 45 -escalar 1.5 [-buddy]\n";
-    std::cout << "Parámetros:\n";
-    std::cout << "  entrada.jpg: Archivo de imagen de entrada\n";
-    std::cout << "  salida.jpg: Archivo de salida procesado\n";
-    std::cout << "  -angulo: Ángulo de rotación (grados)\n";
-    std::cout << "  -escalar: Factor de escalado\n";
-    std::cout << "  -buddy: Usar Buddy System (opcional)\n";
 }
 
 int main(int argc, char* argv[]) {
-    // Valores por defecto
     std::string inputFilename, outputFilename;
     float angle = 0.0f;
     float scaleFactor = 1.0f;
-    bool useBuddy = false;
     const size_t buddyMemory = 20 * 1024 * 1024; // 20 MB
+    bool usarBuddy = false;
 
-    // Procesar argumentos
     if (argc < 6) {
         mostrar_ayuda();
         return 1;
@@ -45,88 +43,87 @@ int main(int argc, char* argv[]) {
             } else if (arg == "-escalar" && i + 1 < argc) {
                 scaleFactor = std::stof(argv[++i]);
             } else if (arg == "-buddy") {
-                useBuddy = true;
+                usarBuddy = true;
             }
         }
 
-        // 1. Encabezado
-        std::cout << "=== PROCESAMIENTO DE IMAGEN ===\n";
-        std::cout << "Archivo de entrada: " << inputFilename << "\n";
-        std::cout << "Archivo de salida: " << outputFilename << "\n";
-        std::cout << "Modo de asignación de memoria: " << (useBuddy ? "Buddy System" : "Convencional") << "\n";
-        std::cout << "------------------------\n";
+        std::cout << "Imagen: " << inputFilename << "\n";
+        std::cout << "Ángulo: " << angle << " | Escala: " << scaleFactor << "\n";
 
-        // 2. Cargar imagen
-        auto start_load = std::chrono::high_resolution_clock::now();
         int width, height, channels;
         unsigned char* originalImage = stbi_load(inputFilename.c_str(), &width, &height, &channels, 0);
         if (!originalImage) throw std::runtime_error("Error al cargar la imagen");
-        auto end_load = std::chrono::high_resolution_clock::now();
-        double load_time = std::chrono::duration<double, std::milli>(end_load - start_load).count();
 
-        // 3. Información de imagen
-        std::cout << "Dimensiones originales: " << width << " x " << height << "\n";
-        std::cout << "Canales: " << channels << " (RGB)\n";
-        std::cout << "Ángulo de rotación: " << angle << " grados\n";
-        std::cout << "Factor de escalado: " << scaleFactor << "\n";
-        std::cout << "------------------------\n";
+        size_t inputSize = width * height * channels;
+        std::cout << "Dimensiones: " << width << "x" << height << " | Canales: " << channels << "\n\n";
 
-        // 4. Procesamiento
-        auto start_process = std::chrono::high_resolution_clock::now();
-        
-        if (useBuddy) {
+        // ========== MODO CONVENCIONAL ==========
+        std::cout << "=== MODO CONVENCIONAL ===\n";
+        long memAntesConv = obtener_memoria_kb();
+        auto startConv = std::chrono::high_resolution_clock::now();
+
+        unsigned char* imageCopy = new unsigned char[inputSize];
+        memcpy(imageCopy, originalImage, inputSize);
+
+        int rotW1, rotH1;
+        unsigned char* rotadaConv = rotarImagen(imageCopy, width, height, channels, angle, rotW1, rotH1);
+        delete[] imageCopy;
+
+        int escW1, escH1;
+        unsigned char* escaladaConv = escalarImagen(rotadaConv, rotW1, rotH1, channels, scaleFactor, escW1, escH1);
+        delete[] rotadaConv;
+
+        auto endConv = std::chrono::high_resolution_clock::now();
+        long memDespConv = obtener_memoria_kb();
+        double tiempoConv = std::chrono::duration<double, std::milli>(endConv - startConv).count();
+
+        std::cout << "[CONVENCIONAL] Tiempo total: " << tiempoConv << " ms\n";
+        std::cout << "[CONVENCIONAL] Memoria estimada: " << ((rotW1 * rotH1 + escW1 * escH1) * channels) / 1024.0 << " KB\n";
+        std::cout << "[CONVENCIONAL] Memoria real usada: " << (memDespConv - memAntesConv) / 1024.0 << " MB\n";
+
+        guardarImagen(("conv_" + outputFilename).c_str(), escaladaConv, escW1, escH1, channels);
+        std::cout << "[CONVENCIONAL] Imagen escalada: " << escW1 << "x" << escH1 << "\n";
+
+        delete[] escaladaConv;
+
+        std::cout << "Imagen guardada como: conv_" << outputFilename << "\n\n";
+
+        // ========== MODO BUDDY (si se activó el flag) ==========
+        if (usarBuddy) {
+            std::cout << "=== MODO BUDDY ===\n";
+            long memAntesBuddy = obtener_memoria_kb();
+            auto startBuddy = std::chrono::high_resolution_clock::now();
+
             BuddySystem buddy(buddyMemory);
-            
-            // Copiar imagen
-            unsigned char* buddyImage = static_cast<unsigned char*>(buddy.allocate(width * height * channels));
-            if (!buddyImage) throw std::runtime_error("Error al asignar memoria");
-            memcpy(buddyImage, originalImage, width * height * channels);
-            stbi_image_free(originalImage);
+            unsigned char* imageBuddy = static_cast<unsigned char*>(buddy.allocate(inputSize));
+            if (!imageBuddy) throw std::runtime_error("No se pudo asignar memoria con Buddy");
+            memcpy(imageBuddy, originalImage, inputSize);
 
-            // Rotar
-            int rotatedWidth, rotatedHeight;
-            unsigned char* rotatedImage = rotarImagen(buddyImage, width, height, channels, angle, buddy, rotatedWidth, rotatedHeight);
-            if (!rotatedImage) throw std::runtime_error("Error al rotar imagen");
-            buddy.free(buddyImage);
-            std::cout << "[INFO] Imagen rotada correctamente.\n";
+            int rotW2, rotH2;
+            unsigned char* rotadaBuddy = rotarImagen(imageBuddy, width, height, channels, angle, buddy, rotW2, rotH2);
+            buddy.free(imageBuddy);
 
-            // Escalar
-            int finalWidth, finalHeight;
-            unsigned char* finalImage = escalarImagen(rotatedImage, rotatedWidth, rotatedHeight, channels, scaleFactor, buddy, finalWidth, finalHeight);
-            if (!finalImage) throw std::runtime_error("Error al escalar imagen");
-            buddy.free(rotatedImage);
-            std::cout << "[INFO] Imagen escalada correctamente.\n";
+            int escW2, escH2;
+            unsigned char* escaladaBuddy = escalarImagen(rotadaBuddy, rotW2, rotH2, channels, scaleFactor, buddy, escW2, escH2);
+            buddy.free(rotadaBuddy);
 
-            // Guardar
-            if (!guardarImagen(outputFilename.c_str(), finalImage, finalWidth, finalHeight, channels)) {
-                throw std::runtime_error("Error al guardar imagen");
-            }
-            buddy.free(finalImage);
-        } else {
-            // Modo convencional (implementar si es necesario)
-            throw std::runtime_error("Modo convencional no implementado");
+            auto endBuddy = std::chrono::high_resolution_clock::now();
+            long memDespBuddy = obtener_memoria_kb();
+            double tiempoBuddy = std::chrono::duration<double, std::milli>(endBuddy - startBuddy).count();
+
+            std::cout << "[BUDDY] Tiempo total: " << tiempoBuddy << " ms\n";
+            std::cout << "[BUDDY] Memoria estimada: " << ((rotW2 * rotH2 + escW2 * escH2) * channels) / 1024.0 << " KB\n";
+            std::cout << "[BUDDY] Memoria real usada: " << (memDespBuddy - memAntesBuddy) / 1024.0 << " MB\n";
+
+            guardarImagen(("buddy_" + outputFilename).c_str(), escaladaBuddy, escW2, escH2, channels);
+            std::cout << "[BUDDY] Imagen escalada: " << escW2 << "x" << escH2 << "\n";
+            buddy.free(escaladaBuddy);
+
+            std::cout << "Imagen guardada como: buddy_" << outputFilename << "\n";
         }
 
-        auto end_process = std::chrono::high_resolution_clock::now();
-        double process_time = std::chrono::duration<double, std::milli>(end_process - start_process).count();
-
-        // 5. Resultados
         std::cout << "------------------------\n";
-        std::cout << "TIEMPO DE PROCESAMIENTO:\n";
-        std::cout << " - Sin Buddy System: " << std::fixed << std::setprecision(2) << load_time << " ms\n";
-        std::cout << " - Con Buddy System: " << process_time << " ms\n";
-
-        // 6. Memoria (cálculo estimado)
-        double mem_without = (width * height * channels * 3) / (1024.0 * 1024.0); // 3 copias
-        double mem_with = mem_without * 0.85; // 15% menos con Buddy
-        
-        std::cout << "\nMEMORIA UTILIZADA:\n";
-        std::cout << " - Sin Buddy System: " << std::setprecision(2) << mem_without << " MB\n";
-        std::cout << " - Con Buddy System: " << mem_with << " MB\n";
-        std::cout << "------------------------\n";
-
-        std::cout << "[INFO] Imagen guardada correctamente en " << outputFilename << "\n";
-
+        stbi_image_free(originalImage);
     } catch (const std::exception& e) {
         std::cerr << "ERROR: " << e.what() << "\n";
         return 1;
