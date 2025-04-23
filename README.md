@@ -40,3 +40,8 @@ Dónde:
 - **escalar** es la proporción de escalación de la nueva imagen
 - **buddy** indica si hará uso del Buddy System. En caso de que no se use la flag, se ejecuta la modificación con el método convencional.
 
+## Autores
+- Paulina Cerón Mancipe 
+- Camilo Córdoba Bedoya
+- Sara V. Cortes Manrique
+
